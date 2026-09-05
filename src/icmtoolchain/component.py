@@ -340,7 +340,9 @@ def upgrade_node_submenu() -> None:
 			if "Install" in action or "Reinstall" in action:
 				assert npm
 				import subprocess
-				prefix = join(get_config_directory(), "node")
+
+				from .script_setup import get_node_packages_directory
+				prefix = get_node_packages_directory()
 				subprocess.call(
 					[npm, "install", "--prefix", prefix, "typescript"],
 					shell=platform.system() == "Windows"
@@ -348,7 +350,9 @@ def upgrade_node_submenu() -> None:
 			elif action == "Uninstall":
 				assert tsc_path
 				import subprocess
-				prefix = join(get_config_directory(), "node")
+
+				from .script_setup import get_node_packages_directory
+				prefix = get_node_packages_directory()
 				subprocess.call(
 					[npm, "uninstall", "--prefix", prefix, "typescript"],
 					shell=platform.system() == "Windows"
@@ -385,7 +389,8 @@ def upgrade_node_submenu() -> None:
 				import subprocess
 
 				from .babel_setup import BABEL_PACKAGES
-				prefix = join(get_config_directory(), "node")
+				from .script_setup import get_node_packages_directory
+				prefix = get_node_packages_directory()
 				subprocess.call(
 					[npm, "uninstall", "--prefix", prefix] + BABEL_PACKAGES,
 					shell=platform.system() == "Windows"

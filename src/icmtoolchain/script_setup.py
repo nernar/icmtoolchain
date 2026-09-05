@@ -3,22 +3,28 @@ import shutil
 import subprocess
 from json import loads as json_loads
 from os import mkdir
-from os.path import exists, isdir, isfile, join
-from typing import Dict, List, Optional, Tuple
+from os.path import exists, isfile, join
+from typing import List, Optional, Tuple
 from urllib.request import urlopen
 
 from .context import GLOBALS
 from .errors import abort
 from .fetch import queue_download_request, retrieve_bytes
-from .logger import debug, success, warn
+from .logger import debug, failure, info, success, warn
 from .output_directory import get_config_directory, get_temporary_directory
-from .shell import InteractiveSession, Progress
-from .utils import AttributeZipFile, remove_tree
+from .shell import InteractiveSession, Progress, confirm_prompt
+from .utils import (AttributeZipFile, remove_tree, request_executable_version,
+                    request_tool)
 
+
+def get_node_packages_directory() -> str:
+	packages_directory_override = GLOBALS.TOOLCHAIN_CONFIG.get_value("tools.packages")
+	from .output_directory import get_config_directory
+	return packages_directory_override or join(get_config_directory(), "packages")
 
 def download_node(lts: bool = False) -> str:
 	debug("Fetching Node.js versions...")
-	version_index: List[Dict] = json_loads(retrieve_bytes("https://nodejs.org/dist/index.json"))
+	version_index = json_loads(retrieve_bytes("https://nodejs.org/dist/index.json"))
 	if not isinstance(version_index, list):
 		raise RuntimeError("Malformed Node.js dist/index.json file!")
 	latest_version = None
@@ -42,7 +48,9 @@ def download_node(lts: bool = False) -> str:
 	archive_path = queue_download_request(url)
 	if not archive_path:
 		abort("Node.js cannot be installed or being cancelled.")
-	node_dir = join(get_config_directory(), "node")
+	node_directory_override = GLOBALS.TOOLCHAIN_CONFIG.get_value("tools.node")
+	from .output_directory import get_config_directory
+	node_directory = node_directory_override or join(get_config_directory(), "node")
 
 	with InteractiveSession(progress=Progress("Extracting Node.js...")):
 		if archive_path.endswith(".zip"):
@@ -59,12 +67,50 @@ def download_node(lts: bool = False) -> str:
 		raise RuntimeError("Failed to extract Node.js")
 
 	extracted_dir = join(get_temporary_directory(), extracted_folders[0])
-	remove_tree(node_dir)
-	shutil.move(extracted_dir, node_dir)
+	remove_tree(node_directory)
+	shutil.move(extracted_dir, node_directory)
 	remove_tree(archive_path)
 
 	success("Successfully downloaded and installed Node.js.")
-	return node_dir
+	return node_directory
+
+def install_typescript(version: Optional[str] = "5", globally: bool = False):
+	if not confirm_prompt(f"Do you want to {'globally' if globally else 'locally'} install TypeScript Compiler{' v' + version if version else ''} (recommended)?", True):
+		return None
+
+	if globally:
+		info(f"Installing TypeScript Compiler globally via npm...")
+		subprocess.run(f"npm install -g typescript{'@' + version if version else ''}", shell=platform.system() == "Windows")
+		tsc = request_tool("tsc") or shutil.which("tsc")
+		if tsc:
+			return tsc
+
+	else:
+		info(f"Installing TypeScript Compiler locally via npm...")
+		node_directory = get_node_packages_directory()
+		subprocess.run("npm install typescript{'@' + version if version else ''}", cwd=node_directory, shell=platform.system() == "Windows")
+		node_bin_directory = join(node_directory, "node_modules", ".bin")
+		tsc = shutil.which("tsc", path=node_bin_directory)
+		if tsc:
+			GLOBALS.TOOLCHAIN_CONFIG.set_value("tools.tsc", tsc)
+			GLOBALS.TOOLCHAIN_CONFIG.save_as_file()
+			return tsc
+
+checked_tsc_requirements = False
+
+def check_tsc_requirements(tsc: str) -> bool:
+	global checked_tsc_requirements
+	if checked_tsc_requirements:
+		return True
+	version = request_executable_version(tsc)
+	if version < 3.0:
+		failure("TypeScript Compiler 3.0 or above required to transpile mods via Inner Core Mod Toolchain.")
+	elif version >= 7:
+		failure("TypeScript Compiler >= 7.0 cannot be used to transpile mods via Inner Core Mod Toolchain.")
+	else:
+		checked_tsc_requirements = True
+		return True
+	return False
 
 def request_typescript(only_check: bool = False) -> Optional[str]:
 	"""
@@ -72,57 +118,36 @@ def request_typescript(only_check: bool = False) -> Optional[str]:
 	"""
 	if GLOBALS.TOOLCHAIN_CONFIG.get_value("denyTypeScript"):
 		return None
-	from .logger import debug, failure
-	from .shell import confirm_prompt
-	from .utils import request_tool
 
 	tsc = request_tool("tsc") or shutil.which("tsc")
-	npm = shutil.which("npm")
-
-	custom_node = GLOBALS.TOOLCHAIN_CONFIG.get_value("tools.node")
-	from .output_directory import get_config_directory
-	local_node = custom_node if custom_node else join(get_config_directory(), "node")
-
-	if isdir(local_node):
-		ext = ".cmd" if platform.system() == "Windows" else ""
-		local_tsc = join(local_node, "tsc" + ext)
-		if platform.system() != "Windows":
-			local_tsc = join(local_node, "bin", "tsc")
-
-		if isfile(local_tsc):
-			tsc = local_tsc
-
-		local_npm = join(local_node, "npm" + ext)
-		if platform.system() != "Windows":
-			local_npm = join(local_node, "bin", "npm")
-
-		if isfile(local_npm):
-			npm = local_npm
-
+	if not tsc:
+		node_bin_directory = join(get_node_packages_directory(), "node_modules", ".bin")
+		tsc = shutil.which("tsc", path=node_bin_directory)
 	if tsc or only_check:
+		return tsc
+	elif tsc and check_tsc_requirements(tsc):
 		return tsc
 
 	if not confirm_prompt("Do you want to enable TypeScript and ES6+ support (requires Node.js to build project)?", True):
 		return None
+
+	npm = shutil.which("npm")
 	if not npm:
 		debug("Node.js not found in system, downloading local instance...")
 		download_node()
 		return request_typescript(only_check=False)
 
-	debug("Updating TypeScript via npm...")
-	subprocess.run([npm, "install", "-g", "typescript"], shell=platform.system()=="Windows")
-	tsc = shutil.which("tsc") or request_tool("tsc")
-
-	if not tsc and isdir(local_node):
-		ext = ".cmd" if platform.system() == "Windows" else ""
-		tsc = join(local_node, "tsc" + ext)
-		if platform.system() != "Windows":
-			tsc = join(local_node, "bin", "tsc")
-
+	tsc = install_typescript(globally=not tsc)
 	if tsc:
 		return tsc
 	failure("Something went wrong when trying to install TypeScript Compiler, please check your Node.js and npm installation and try again.")
 	return None
+
+def request_typescript_flags(tsc: str) -> List[str]:
+	tsc_version = request_executable_version(tsc)
+	if 6.0 <= tsc_version < 7.0:
+		return ["--ignoreDeprecations", "6.0"]
+	return []
 
 def fetch_declarations() -> bool:
 	try:

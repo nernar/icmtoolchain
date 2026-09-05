@@ -10,6 +10,7 @@ from .config import FileConfig
 from .context import GLOBALS, PROPERTIES
 from .hglob import glob
 from .logger import attention, debug, failure, frozen, success
+from .script_setup import request_typescript_flags
 from .tsconfig import TSCONFIG
 from .utils import ensure_file_directory, ensure_not_whitespace
 
@@ -271,7 +272,7 @@ class Includes:
 				command = [
 					tsc,
 					"--project", self.get_tsconfig()
-				]
+				] + request_typescript_flags(tsc)
 				if not PROPERTIES.get_value("release"):
 					# Do NOT resolve down-level declaration, like 'android.d.ts' if it not included
 					command.append("--noResolve")

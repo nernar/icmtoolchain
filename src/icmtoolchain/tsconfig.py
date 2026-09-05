@@ -158,6 +158,7 @@ TSCONFIG_TOOLCHAIN: Dict[str, Any] = {
 	"module": "none",
 	"incremental": True,
 	"lib": ["es5", "es2015.core", "es2015.generator"],
+	"strict": False, # TypeScript Compiler (below 6+) defaults
 	"skipDefaultLibCheck": True,
 	"experimentalDecorators": True,
 	"noEmitOnError": True,

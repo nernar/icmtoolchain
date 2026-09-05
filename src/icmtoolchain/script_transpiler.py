@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Iterable, List, Optional
 from .context import GLOBALS, PROPERTIES
 from .hglob import glob
 from .output_directory import unique_folder_name
+from .script_setup import request_typescript_flags
 from .utils import (copy_file, ensure_directory, flush_json_if_changed,
                     relativize_or_hash_path)
 
@@ -156,9 +157,6 @@ class TscTranspiler(ScriptTranspiler):
 	def create_tsconfig_contents(self, include: List[str], exclude: Optional[List[str]] = None, **options) -> dict:
 		template = {
 			"compilerOptions": {
-				# TypeScript Compiler 6+ Changes
-				"strict": False,
-				"ignoreDeprecations": "6.0",
 				# Overrideable configurations and internal options
 				**GLOBALS.TSCONFIG_TOOLCHAIN,
 				**options
@@ -224,7 +222,7 @@ class TscTranspiler(ScriptTranspiler):
 		if not tsc:
 			raise RuntimeError("A tsc is required to build this source, make sure it is present before transpiling.")
 
-		command = [tsc, *args]
+		command = [tsc, *args] + request_typescript_flags(tsc)
 		if not PROPERTIES.get_value("release"):
 			# Do NOT resolve down-level declaration, like 'android.d.ts' if it is not included
 			command.append("--noResolve")
