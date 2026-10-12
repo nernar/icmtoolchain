@@ -871,7 +871,10 @@ def pretty_print(*values: object, style: str = "", sep: Optional[str] = " ", end
 		text = to_formatted_text(value, style=style, auto_convert=True) # type: ignore
 		print_formatted_text(text, end="", file=file, flush=flush, style=baked_style, include_default_pygments_style=include_default_pygments_style)
 		print_something = True
-	print_formatted_text(end if end is not None else "\n", end="", file=file, flush=flush, style=baked_style, include_default_pygments_style=include_default_pygments_style)
+	if end and "\r" in end:
+		print(end, end="", file=file, flush=True)
+	elif end != "":
+		print_formatted_text(end or "\n", end="", file=file, flush=flush, style=baked_style, include_default_pygments_style=include_default_pygments_style)
 
 def pretty_ansi_layers(*layers: Iterable[Union[int, str]], end: Optional[str] = "", file: Optional[Any] = None, flush: bool = False, include_default_pygments_style: bool = False) -> None:
 	from prompt_toolkit import ANSI

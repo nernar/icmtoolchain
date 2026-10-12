@@ -31,7 +31,7 @@ class BuildTarget:
 			relative_path += "{}"
 
 		existing_names = { entry.name for entry in self.entries }
-		index = 0
+		index = 2
 		formatted_name = relative_path.format("")
 		while formatted_name in existing_names:
 			formatted_name = relative_path.format(index)

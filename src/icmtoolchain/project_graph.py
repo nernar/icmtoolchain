@@ -96,7 +96,8 @@ class ProjectEdge:
 		return f"ProjectEdge(project={self.project}, dependencies=({', '.join(str(edge.project) for edge in self.dependencies)}), references=({', '.join(str(edge.project) for edge in self.references)}))"
 
 	def __str__(self) -> str:
-		return f"Project {basename(self.project.directory) if isinstance(self.project, FileConfig) else self.project} ({len(self.dependencies)} dependencies)"
+		opt_suffix = f" ({len(self.dependencies)} dependencies)" if len(self.dependencies) else ""
+		return f"Project {basename(self.project.directory) if isinstance(self.project, FileConfig) else self.project}{opt_suffix}"
 
 class ProjectGraph(Dict[Union[MakeDataConfig, Artifact], ProjectEdge]):
 	def __init__(self, project: MakeDataConfig) -> None:
