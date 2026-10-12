@@ -6,6 +6,7 @@ from os.path import exists, isdir, join, relpath
 from typing import Any, Dict, List
 
 from .context import GLOBALS
+from .utils import request_executable_version
 
 # The TypeScript Compiler - Version 4.8.3
 TSCONFIG: Dict[str, Any] = {
@@ -222,10 +223,13 @@ class CompositeProject:
 		return list(set(declarations))
 
 	def flush(self, **options: Any) -> None:
+		from .script_setup import request_typescript
+		tsc = request_typescript()
+		if not tsc:
+			raise RuntimeError("A tsc is required to build project, make sure it is present before calling this function.")
 		template = {
 			"compilerOptions": {
 				"strict": False,
-				"ignoreDeprecations": "6.0",
 				**GLOBALS.TSCONFIG_TOOLCHAIN,
 				"target": "es5", # Most of ES6 is not realized in Rhino
 				"module": "none",
@@ -249,6 +253,10 @@ class CompositeProject:
 			template["files"] = declarations
 		if len(self.references) > 0:
 			template["references"] = self.references
+		tsc_version = request_executable_version(tsc)
+		if 6.0 <= tsc_version < 7.0:
+			template["compilerOptions"]["ignoreDeprecations"] = "6.0"
+
 		with open(self.get_tsconfig(), "w", encoding="utf-8") as tsconfig:
 			tsconfig.write(json.dumps(template, indent="\t", ensure_ascii=False) + "\n")
 

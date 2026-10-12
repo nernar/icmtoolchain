@@ -177,7 +177,13 @@ class Includes:
 			] + self.exclude,
 			"include": self.include
 		}
+
+		from .script_transpiler import resolve_declarations
+		declarations = resolve_declarations()
+		if declarations:
+			template["files"] = declarations
 		if not use_babel:
+			template["compilerOptions"]["composite"] = True
 			template["compilerOptions"]["outFile"] = temporary_path
 		template["compilerOptions"].update(self.params)
 
