@@ -704,11 +704,8 @@ def compile_java(tool: Optional[str] = "javac") -> int:
 		toolchain_config = Config()
 		toolchain_config.set_value("classpath", classpath_directories)
 
-	directories = GLOBALS.MAKE_CONFIG.iterate_java(defaults=toolchain_config)
-	directories, has_anything = tee(directories)
-	try:
-		next(has_anything)
-	except StopIteration:
+	directories = list(GLOBALS.MAKE_CONFIG.iterate_java(defaults=toolchain_config))
+	if not directories:
 		GLOBALS.project_structure.generate_config()
 		return 0
 	if not isdir(classpath_directory):

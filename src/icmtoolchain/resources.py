@@ -64,11 +64,8 @@ def build_pack_graphics() -> int:
 	graphics_archive = join(GLOBALS.PROJECT_STRUCTURE.directory, "graphics.zip")
 	if exists(graphics_archive):
 		remove_tree(graphics_archive)
-	graphics_groups = GLOBALS.MAKE_CONFIG.iterate_pack_graphics()
-	graphics_groups, has_anything = tee(graphics_groups)
-	try:
-		next(has_anything)
-	except StopIteration:
+	graphics_groups = list(GLOBALS.MAKE_CONFIG.iterate_pack_graphics())
+	if not graphics_groups:
 		return 0
 
 	graphics_directory = GLOBALS.MAKE_CONFIG.get_build_path("graphics")

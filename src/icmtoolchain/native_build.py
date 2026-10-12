@@ -1,9 +1,10 @@
 import os
 import subprocess
+from dataclasses import dataclass, field
 from itertools import tee
 from os.path import abspath, basename, exists, isdir, isfile, join, relpath
-from typing import (Collection, Iterable, List, MutableSequence, NamedTuple,
-                    Optional, Tuple)
+from typing import (Collection, Dict, Iterable, List, MutableSequence,
+                    NamedTuple, Optional, Tuple)
 
 from .config import Config, FileConfig
 from .context import GLOBALS
@@ -24,12 +25,18 @@ CODE_INVALID_JSON = 1004
 CODE_INVALID_PATH = 1005
 
 
-class BuildTarget(NamedTuple):
-	directory: str
+@dataclass
+class AbiBuildTarget:
+	abi: str
+	options: MakeNativeData
+	stdincludes: MutableSequence[str]
+
+@dataclass
+class BuildTarget:
+	input_directory: str
 	relative_directory: str
 	output_directory: str
-	manifest: MakeNativeData
-	stdincludes: MutableSequence[str]
+	abis: MutableSequence[AbiBuildTarget] = field(default_factory=list)
 
 def collect_stdincludes_directories(directories: Optional[Collection[str]]) -> List[str]:
 	stdincludes = []
@@ -101,18 +108,23 @@ def abi_to_runtime_architecture(abi: str) -> str:
 		return RUNTIME_ARCHES[abi]
 	return abi
 
-def get_native_build_targets(directories: Iterable[MakeNativeData]) -> List[BuildTarget]:
-	targets = []
+def compute_build_targets(arched_directories: Iterable[Tuple[str, Iterable[MakeNativeData]]]) -> List[BuildTarget]:
+	input_to_output_mapping: Dict[Tuple[str, str], BuildTarget] = {}
+	for abi, directories in arched_directories:
+		for directory in directories:
+			mapping_key = (directory.relative_path, directory.output_path)
 
-	for native_data in directories:
-		directory = GLOBALS.MAKE_CONFIG.get_path(native_data.relative_path)
-		target = GLOBALS.PROJECT_STRUCTURE.declare_target("native", native_data.output_path)
-		ensure_directory(target.absolute_path)
-		stdincludes = collect_stdincludes_directories(list(native_data.stdincludes))
-		target = BuildTarget(directory, native_data.output_path, target.absolute_path, native_data, stdincludes)
-		targets.append(target)
+			if not mapping_key in input_to_output_mapping:
+				input_directory = GLOBALS.MAKE_CONFIG.get_path(directory.relative_path)
+				target = GLOBALS.PROJECT_STRUCTURE.declare_target("native", directory.output_path)
+				ensure_directory(target.absolute_path)
+				input_to_output_mapping[mapping_key] = BuildTarget(input_directory, directory.output_path, target.absolute_path)
 
-	return targets
+			stdincludes = collect_stdincludes_directories(list(directory.stdincludes))
+			build_target = AbiBuildTarget(abi, directory, stdincludes)
+			input_to_output_mapping[mapping_key].abis.append(build_target)
+
+	return list(input_to_output_mapping.values())
 
 def compile_directory_with_gcc(directory: str, target_directory: str, target_so: str, abi: str, stdincludes: Collection[str], manifest: MakeNativeData) -> int:
 	info(f"* Compiling {manifest.shared_name!r} for {abi}")
@@ -254,33 +266,29 @@ def compile_directory_with_gcc(directory: str, target_directory: str, target_so:
 	linking_command += dependencies
 	return subprocess.call(linking_command)
 
-def build_native_directories(directories: Iterable[MakeNativeData], directory_tuples: Iterable[Tuple[str, Iterable[MakeNativeData]]], target_directory: str) -> int:
-	targets = get_native_build_targets(directories)
-	abi_targets = [(
-		directory[0],
-		iter(get_native_build_targets(directory[1]))
-	) for directory in directory_tuples]
-
+def build_native_directories(arched_directories: Iterable[Tuple[str, Iterable[MakeNativeData]]], target_directory: str) -> int:
+	targets = compute_build_targets(arched_directories)
 	for target in targets:
+		preferred_abi = target.abis[0]
 		target_library_directory = join(target_directory, target.relative_directory)
-		soname = f"lib{target.manifest.shared_name}.so"
+		soname = f"lib{preferred_abi.options.shared_name}.so"
 
-		if target.manifest.keep_sources:
+		if preferred_abi.options.keep_sources:
 			# Copy everything without built directories.
-			copy_directory(target.directory, target.output_directory, clear_destination=True)
+			copy_directory(target.input_directory, target.output_directory, clear_destination=True)
 			remove_tree(join(target.output_directory, "so"))
 			os.remove(join(target.output_directory, soname))
 		else:
 			# Cleanup built directories and copy manifest.
 			remove_tree(target.output_directory)
-			copy_file(join(target.directory, "manifest"), join(target.output_directory, "manifest"))
+			copy_file(join(target.input_directory, "manifest"), join(target.output_directory, "manifest"))
 
 			# Also copy includes if necessary.
-			keep_includes = target.manifest.keep_includes
-			for include_path in target.manifest.include:
+			keep_includes = preferred_abi.options.keep_includes
+			for include_path in preferred_abi.options.include:
 				output_include_path = join(target.output_directory, include_path)
 				if keep_includes:
-					src_include_path = join(target.directory, include_path)
+					src_include_path = join(target.input_directory, include_path)
 					if isdir(src_include_path):
 						copy_directory(src_include_path, output_include_path, clear_destination=True)
 					else:
@@ -289,47 +297,47 @@ def build_native_directories(directories: Iterable[MakeNativeData], directory_tu
 					remove_tree(output_include_path)
 
 		# Copy already prebuilt libraries, output path will be 'libname.so' or 'so/arch/libname.so'.
-		if exists(join(target.directory, ".precompiled")):
-			frozen(f"Library directory {target.directory} skipped, because precompiled flag is set.")
+		if exists(join(target.input_directory, ".precompiled")):
+			frozen(f"Library directory {target.relative_directory} skipped, because precompiled flag is set.")
 
 			libraries_count = 0
-			for abi, scoped_directories in abi_targets:
-				source_library = abspath(join(target.directory, "so", abi, soname))
+			for abi_target in target.abis:
+				source_library = abspath(join(target.output_directory, "so", abi_target.abi, soname))
 				if isfile(source_library):
-					target_library = abspath(join(target.output_directory, "so", abi_to_runtime_architecture(abi), soname))
+					target_library = abspath(join(target.output_directory, "so", abi_to_runtime_architecture(abi_target.abi), soname))
 					copy_file(source_library, target_library)
 					libraries_count += 1
 
 			if libraries_count == 0:
-				source_library = abspath(join(target.directory, soname))
+				source_library = abspath(join(target.input_directory, soname))
 				if isfile(source_library):
 					target_library = abspath(join(target.output_directory, soname))
 					copy_file(source_library, target_library)
 					libraries_count += 1
 
 			if libraries_count == 0:
-				attention(f"Library directory {target.directory} should be precompiled, but there is no shared libraries.")
+				attention(f"Library directory {target.relative_directory} should be precompiled, but there is no shared libraries.")
 				return CODE_FAILED_INVALID_MANIFEST
 			continue
 
 		# Compile library for requested ABIs.
 		overall_result = CODE_OK
-		for abi, scoped_directories in abi_targets:
-			GLOBALS.MAKE_CONFIG.bisect_properties(abi_to_architecture(abi))
-			scoped_target = next(scoped_directories)
-			target_so = abspath(join(target.output_directory, soname)) if len(abi_targets) == 1 \
-				else abspath(join(target.output_directory, "so", abi_to_runtime_architecture(abi), soname))
+		for abi_target in target.abis:
+			GLOBALS.MAKE_CONFIG.bisect_properties(abi_to_architecture(abi_target.abi))
+			target_so = abspath(join(target.output_directory, soname)) if len(target.abis) == 1 \
+				else abspath(join(target.output_directory, "so", abi_to_runtime_architecture(abi_target.abi), soname))
 
 			overall_result += compile_directory_with_gcc(
-				scoped_target.directory,
+				target.input_directory,
 				target_library_directory,
 				target_so,
-				abi,
-				scoped_target.stdincludes,
-				scoped_target.manifest
+				abi_target.abi,
+				abi_target.stdincludes,
+				abi_target.options
 			)
 			if overall_result != 0:
 				break
+
 		GLOBALS.MAKE_CONFIG.remove_rules("native_architecture")
 		if overall_result != 0:
 			return overall_result
@@ -360,24 +368,20 @@ def compile_native(abis: Collection[str]) -> int:
 		toolchain_config = Config()
 		toolchain_config.set_value("stdincludes", stdincludes_directories)
 
-	directories = GLOBALS.MAKE_CONFIG.iterate_native(defaults=toolchain_config)
-	directories, has_anything = tee(directories)
-	try:
-		next(has_anything)
-	except StopIteration:
+	arched_directories: Iterable[tuple[str, Iterable[MakeNativeData]]] = []
+	for abi in abis:
+		GLOBALS.MAKE_CONFIG.bisect_properties(abi_to_architecture(abi))
+		scoped_directories = list(GLOBALS.MAKE_CONFIG.iterate_native(defaults=toolchain_config))
+		arched_directories.append((abi, scoped_directories))
+	GLOBALS.MAKE_CONFIG.remove_rules("native_architecture")
+
+	if not any(directories for _, directories in arched_directories):
 		GLOBALS.PROJECT_STRUCTURE.generate_config()
 		return 0
 	if not isdir(stdincludes_toolchain):
 		attention("Not found 'stdincludes', in most cases build will be failed, please install it via tasks.")
 
-	directory_tuples: Iterable[tuple[str, Iterable[MakeNativeData]]] = []
-	for abi in abis:
-		GLOBALS.MAKE_CONFIG.bisect_properties(abi_to_architecture(abi))
-		scoped_directories = GLOBALS.MAKE_CONFIG.iterate_native(defaults=toolchain_config)
-		directory_tuples.append((abi, scoped_directories))
-	GLOBALS.MAKE_CONFIG.remove_rules("native_architecture")
-
-	overall_result = build_native_directories(directories, directory_tuples, target_directory)
+	overall_result = build_native_directories(arched_directories, target_directory)
 
 	GLOBALS.PROJECT_STRUCTURE.generate_config()
 	startup_millis = time() - startup_millis
@@ -389,11 +393,8 @@ def compile_native(abis: Collection[str]) -> int:
 	return overall_result
 
 def copy_shared_objects(abis: Collection[str]) -> int:
-	shared_objects = GLOBALS.MAKE_CONFIG.iterate_shared_objects()
-	shared_objects, has_anything = tee(shared_objects)
-	try:
-		next(has_anything)
-	except StopIteration:
+	shared_objects = list(GLOBALS.MAKE_CONFIG.iterate_shared_objects())
+	if not shared_objects:
 		return 0
 	GLOBALS.PROJECT_STRUCTURE.cleanup_target("shared_object")
 	order = set()
