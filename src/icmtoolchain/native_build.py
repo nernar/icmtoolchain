@@ -9,7 +9,8 @@ from .config import Config, FileConfig
 from .context import GLOBALS
 from .language import MakeNativeData
 from .logger import attention, debug, failure, frozen, info, print, success
-from .native_setup import arch_to_abi, prepare_compiler_executable
+from .native_setup import (FALLBACK_CPP_STANDARD, abi_to_architecture,
+                           abi_to_ndk_target, prepare_compiler_executable)
 from .output_directory import expand_paths
 from .utils import (copy_directory, copy_file, ensure_directory, ensure_file,
                     ensure_file_directory, ensure_not_whitespace,
@@ -31,7 +32,7 @@ class BuildTarget(NamedTuple):
 	stdincludes: MutableSequence[str]
 
 def collect_stdincludes_directories(directories: Optional[Collection[str]]) -> List[str]:
-	stdincludes = list()
+	stdincludes = []
 	if not directories:
 		return stdincludes
 	for directory in directories:
@@ -81,7 +82,7 @@ def add_fake_so(executable: str, abi: str, name: str) -> None:
 	if not isfile(file):
 		from .output_directory import get_script_directory
 		result = subprocess.call([
-			executable, "-std=c++11",
+			executable, FALLBACK_CPP_STANDARD,
 			join(get_script_directory(), "fakeso.cpp"),
 			"-shared", "-o", file
 		])
@@ -101,7 +102,7 @@ def abi_to_runtime_architecture(abi: str) -> str:
 	return abi
 
 def get_native_build_targets(directories: Iterable[MakeNativeData]) -> List[BuildTarget]:
-	targets = list()
+	targets = []
 
 	for native_data in directories:
 		directory = GLOBALS.MAKE_CONFIG.get_path(native_data.relative_path)
@@ -119,12 +120,12 @@ def compile_directory_with_gcc(directory: str, target_directory: str, target_so:
 
 	options = list(manifest.options)
 	if not options or len(options) == 0:
-		options = ["-std=c++11"]
+		options = [FALLBACK_CPP_STANDARD]
 	debug(", ".join(options))
 
 	executable = prepare_compiler_executable(abi)
 	compiler_command = [executable, "-DANDROID_STL=c++_static"]
-	includes = list()
+	includes = []
 	for stdincludes_directory in reversed(list(stdincludes)):
 		includes.append(f"-I{stdincludes_directory}")
 	dependencies = [f"-L{get_fakeso_directory(abi)}", "-landroid", "-lm", "-llog", "-ldl", "-lc"]
@@ -134,6 +135,10 @@ def compile_directory_with_gcc(directory: str, target_directory: str, target_so:
 	for link in links:
 		add_fake_so(executable, abi, link)
 		dependencies.append(f"-l{link}")
+
+	flags = [
+		"-target", abi_to_ndk_target(abi)
+	]
 
 	# Always search for dependencies in current directory.
 	search_directory = abspath(join(directory, ".."))
@@ -162,10 +167,11 @@ def compile_directory_with_gcc(directory: str, target_directory: str, target_so:
 
 	# Preprocess to compile changed sources.
 	import filecmp
-	object_files = list()
+	object_files = []
 	object_position = 1
 	recompiled_count = 0
 	total_count = len(source_files)
+	overall_result = 0
 
 	for file in source_files:
 		relative_file = relpath(file, directory)
@@ -180,7 +186,7 @@ def compile_directory_with_gcc(directory: str, target_directory: str, target_so:
 
 		result = subprocess.call(compiler_command + [
 			"-E", file, "-o", tmp_preprocessed_file
-		] + includes + options)
+		] + flags + includes + options)
 
 		if result == CODE_OK:
 			if not isfile(preprocessed_file) or not isfile(object_file) \
@@ -193,8 +199,8 @@ def compile_directory_with_gcc(directory: str, target_directory: str, target_so:
 
 				debug(f"Compiling {relative_file} ({object_position}/{total_count}){' ' * 48}", end="\r")
 				result = max(result, subprocess.call(compiler_command + [
-					"-c", preprocessed_file, "-o", object_file
-				] + options + ([] if "64" in abi else ["-shared"])))
+					"-c", preprocessed_file, "-o", object_file, "-fPIC"
+				] + flags + options))
 				if result != CODE_OK:
 					if isfile(object_file):
 						os.remove(object_file)
@@ -207,10 +213,10 @@ def compile_directory_with_gcc(directory: str, target_directory: str, target_so:
 			overall_result = result
 		object_position += 1
 
+	debug(f"Recompiled {recompiled_count}/{total_count} files with result {overall_result} ({'OK' if overall_result == 0 else 'ERROR'}){' ' * 48}")
 	if overall_result != CODE_OK:
 		print()
 		return overall_result
-	debug(f"Recompiled {recompiled_count}/{total_count} files with result {overall_result} ({'OK' if overall_result == 0 else 'ERROR'}){' ' * 48}")
 
 	for link in manifest.link_static:
 		link_path = GLOBALS.MAKE_CONFIG.get_relative_path(join("static_libs", abi, link))
@@ -224,7 +230,7 @@ def compile_directory_with_gcc(directory: str, target_directory: str, target_so:
 
 	debug("Linking object files")
 	ensure_file(target_so)
-	linking_command = list()
+	linking_command = []
 	linking_command += compiler_command
 	modified_objects = join(object_directory, "modified_objects.rsp")
 	with open(modified_objects, "w", encoding="utf-8") as modified:
@@ -243,6 +249,7 @@ def compile_directory_with_gcc(directory: str, target_directory: str, target_so:
 		linking_command += options
 	linking_command.append("-o")
 	linking_command.append(target_so)
+	linking_command += flags
 	linking_command += includes
 	linking_command += dependencies
 	return subprocess.call(linking_command)
@@ -308,7 +315,7 @@ def build_native_directories(directories: Iterable[MakeNativeData], directory_tu
 		# Compile library for requested ABIs.
 		overall_result = CODE_OK
 		for abi, scoped_directories in abi_targets:
-			GLOBALS.MAKE_CONFIG.bisect_properties(arch_to_abi(abi))
+			GLOBALS.MAKE_CONFIG.bisect_properties(abi_to_architecture(abi))
 			scoped_target = next(scoped_directories)
 			target_so = abspath(join(target.output_directory, soname)) if len(abi_targets) == 1 \
 				else abspath(join(target.output_directory, "so", abi_to_runtime_architecture(abi), soname))
@@ -337,7 +344,7 @@ def compile_native(abis: Collection[str]) -> int:
 	ensure_directory(target_directory)
 	GLOBALS.PROJECT_STRUCTURE.cleanup_target("native")
 
-	stdincludes_directories = list()
+	stdincludes_directories = []
 	stdincludes_toolchain = GLOBALS.TOOLCHAIN_CONFIG.get_relative_path("stdincludes")
 	if not isdir(stdincludes_toolchain):
 		from .output_directory import get_config_directory
@@ -365,7 +372,7 @@ def compile_native(abis: Collection[str]) -> int:
 
 	directory_tuples: Iterable[tuple[str, Iterable[MakeNativeData]]] = []
 	for abi in abis:
-		GLOBALS.MAKE_CONFIG.bisect_properties(arch_to_abi(abi))
+		GLOBALS.MAKE_CONFIG.bisect_properties(abi_to_architecture(abi))
 		scoped_directories = GLOBALS.MAKE_CONFIG.iterate_native(defaults=toolchain_config)
 		directory_tuples.append((abi, scoped_directories))
 	GLOBALS.MAKE_CONFIG.remove_rules("native_architecture")
@@ -396,7 +403,7 @@ def copy_shared_objects(abis: Collection[str]) -> int:
 	for shared_object in shared_objects:
 		relative_path = shared_object.relative_path
 		for abi in abis:
-			GLOBALS.MAKE_CONFIG.bisect_properties(arch_to_abi(abi))
+			GLOBALS.MAKE_CONFIG.bisect_properties(abi_to_architecture(abi))
 			formatted_relative_path = relative_path.format(abi)
 			for shared_object_path in expand_paths(GLOBALS.MAKE_CONFIG.get_relative_path(formatted_relative_path)):
 				shared_object_name = basename(shared_object_path)

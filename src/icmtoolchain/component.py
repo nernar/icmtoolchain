@@ -51,11 +51,11 @@ def install_cpp(**kwargs) -> None:
 		abort("Please describe options `abis` or `debugAbi` in your 'toolchain.json' before installing NDK!")
 	if abi and not abi in abis:
 		abis.append(abi)
-	from .native_setup import abi_to_arch, check_installation, install_gcc
+	from .native_setup import check_installation, install_ndk
 	if not kwargs.get("reinstall", False):
-		abis = list(filter(lambda abi: not check_installation(abi_to_arch(abi)), abis))
+		abis = list(filter(lambda abi: not check_installation(abi), abis))
 	if len(abis) > 0:
-		install_gcc([abi_to_arch(abi) for abi in abis], reinstall=True)
+		install_ndk(abis, reinstall=True)
 
 def install_adb(**kwargs) -> None:
 	from .adb import download_adb
@@ -82,8 +82,8 @@ def is_installed(component: Component) -> bool:
 	if component.keyword == "java":
 		return isdir(join(get_config_directory(), "java"))
 	if component.keyword == "cpp":
-		from .native_setup import check_installation
-		return check_installation(["arm", "arm64"])
+		from .native_setup import FALLBACK_NDK_VERSIONS, check_installation
+		return check_installation(list(FALLBACK_NDK_VERSIONS))
 	
 	path = join(get_config_directory(), component.location)
 	if isdir(path):

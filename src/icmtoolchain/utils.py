@@ -356,3 +356,19 @@ class AttributeZipFile(ZipFile):
 		if attr != 0:
 			os.chmod(abspath(targetpath), attr)
 		return targetpath
+
+def get_os_bitness():
+	if platform.system() == "Windows":
+		if "PROCESSOR_ARCHITEW6432" in os.environ:
+			return 64
+		arch = os.environ.get("PROCESSOR_ARCHITECTURE", "").upper()
+		if "64" in arch or "AMD64" in arch:
+			return 64
+		return 32
+	bitness_str, _ = platform.architecture()
+	if "64" in bitness_str:
+		return 64
+	machine = platform.machine().lower()
+	if "64" in machine or "x86_64" in machine or "amd64" in machine or "arm64" in machine:
+		return 64
+	return 32

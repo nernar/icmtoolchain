@@ -1,21 +1,18 @@
+import os
 import platform
 import re
-import struct
-import subprocess
-import sys
 import zipfile
-from logging import debug
-from os import environ, getenv, listdir, makedirs
-from os.path import abspath, basename, exists, isdir, isfile, join, realpath
+from os import environ, getenv, makedirs
+from os.path import basename, exists, isdir, isfile, join
 from typing import Any, Generator, List, Optional, Union
 
 from .context import GLOBALS
 from .errors import abort
 from .fetch import queue_download_request
-from .logger import attention, error, failure, print, success, warn
+from .logger import attention, failure, print, success, warn
 from .shell import InteractiveSession, Progress, confirm_prompt
-from .utils import (AttributeZipFile, RuntimeCodeError, ensure_file,
-                    ensure_not_whitespace, iterate_subdirectories,
+from .utils import (AttributeZipFile, RuntimeCodeError, ensure_not_whitespace,
+                    get_os_bitness, iterate_subdirectories,
                     read_properties_stream, remove_tree)
 
 ABIS = {
@@ -24,25 +21,29 @@ ABIS = {
 	"x86": "x86",
 	"x86_64": "x86_64"
 }
-
+ABI_TARGETS = {
+	"armeabi-v7a": "armv7a-linux-androideabi21",
+	"arm64-v8a": "aarch64-linux-android24",
+	"x86": "i686-linux-android21",
+	"x86_64": "x86_64-linux-android24",
+}
 FALLBACK_NDK_VERSIONS = {
-	"armeabi-v7a": "16.1.4479499",
+	"armeabi-v7a": "21.4.7075529",
 	"arm64-v8a": "21.4.7075529"
 }
+FALLBACK_CPP_STANDARD = "-std=c++17"
 
 GCC_EXECUTABLES = dict()
 
-
-def abi_to_arch(abi: str) -> str:
+def abi_to_architecture(abi: str) -> str:
 	if abi in ABIS:
 		return ABIS[abi]
 	raise ValueError(f"Unsupported ABI {abi!r}!")
 
-def arch_to_abi(arch: str) -> str:
-	for abi in ABIS:
-		if arch == ABIS[abi]:
-			return abi
-	raise ValueError(f"Unsupported architecture {arch!r}!")
+def abi_to_ndk_target(abi: str) -> str:
+	if abi in ABI_TARGETS:
+		return ABI_TARGETS[abi]
+	raise ValueError(f"Unsupported ABI {abi!r}!")
 
 def ndk_version_to_revision(version: str) -> str:
 	try:
@@ -78,6 +79,9 @@ def search_unversioned_ndk_path(home_directory: str, contains_ndk: bool = False)
 	if contains_ndk:
 		for ndk in search_ndk_subdirectories(home_directory):
 			yield ndk
+	root_ndk_path = environ.get("NDK_PATH")
+	if root_ndk_path:
+		yield root_ndk_path
 	try:
 		android_tools = environ["ANDROID_SDK_ROOT"]
 	except KeyError:
@@ -130,52 +134,114 @@ def get_ndk_path(ndk_version: Optional[str] = None) -> Optional[str]:
 	# Windows
 	return search_ndk_path(getenv("LOCALAPPDATA", "."), ndk_version=ndk_version)
 
-def search_for_gcc_executable(ndk_directory: str) -> Optional[str]:
-	search_directory = join(realpath(ndk_directory), "bin")
-	if isdir(search_directory):
-		pattern = re.compile(r"[0-9_A-Za-z]*-linux-android(eabi)*-g\+\+.*")
-		files = listdir(search_directory)
-		for filename in files:
-			if re.match(pattern, filename):
-				return abspath(join(search_directory, filename))
-		debug(f"Searching GCC in {search_directory} with {len(files)} files...")
+def get_ndk_version_for_abi(abi: str) -> Optional[str]:
+	ndk_version = GLOBALS.PREFERRED_CONFIG.get_value("native.ndkVersions." + abi)
+	if not ndk_version and abi in FALLBACK_NDK_VERSIONS:
+		ndk_version = FALLBACK_NDK_VERSIONS[abi]
+	return ndk_version
 
-def require_compiler_executable(arch: str, install_if_required: bool = False) -> Optional[str]:
+def search_for_clang_executable(ndk_directory: str, verbose: bool = False) -> Optional[str]:
+	system = platform.system()
+	machine = platform.machine().lower()
+	is_android = "TERMUX_VERSION" in os.environ or "ANDROID_ROOT" in os.environ
+	is_arm_host = machine in ("aarch64", "arm64", "armv8l")
+
+	if is_android or (system == "Linux" and is_arm_host):
+		import shutil
+		clang_path = shutil.which("clang++")
+		if clang_path:
+			return clang_path
+
+		if verbose:
+			if is_android:
+				attention(
+					"Clang compiler is required to build native modules on Android, but it is not installed.",
+					"You can install it using Termux package manager:"
+				)
+				warn(" - pkg update")
+				warn(" - pkg install clang")
+			else:
+				attention(
+					f"Official Android NDK does not provide prebuilt binaries for {system} ({machine}) host.",
+					"You need to install system Clang to cross-compile modules:"
+				)
+				warn(" - sudo apt-get install clang")
+				warn(" - sudo pacman -S clang")
+				warn(" - sudo dnf install clang")
+			warn("Make sure 'clang++' is accessible in your PATH environment variable.")
+		return
+
+	prebuilt_dir = os.path.join(ndk_directory, "toolchains", "llvm", "prebuilt")
+	if os.path.isdir(prebuilt_dir):
+		subdirs = [entry.name for entry in os.scandir(prebuilt_dir) if entry.is_dir()]
+		if subdirs:
+			host_tag = subdirs[0]
+			exe_name = "clang++.exe" if system == "Windows" else "clang++"
+			candidate = os.path.join(prebuilt_dir, host_tag, "bin", exe_name)
+			if os.path.isfile(candidate):
+				return candidate
+
+	import shutil
+	system_clang = shutil.which("clang++")
+	if system_clang:
+		return system_clang
+
+	if verbose:
+		attention(
+			f"Could not locate Clang compiler executable inside Android NDK at '{ndk_directory}'.",
+			"We were unable to detect valid toolchain binaries. You can try following options:"
+		)
+		if system == "Windows":
+			if is_arm_host:
+				warn(" - If you are on Windows on ARM, install LLVM: winget install LLVM.LLVM")
+			warn(" - Verify that NDK archive was extracted completely without file corruptions.")
+			warn(" - Ensure path to NDK does not contain special characters or exceed MAX_PATH.")
+		elif system == "Darwin":
+			warn(" - Reinstall or verify Android NDK r21e for macOS.")
+			warn(" - Alternatively, install LLVM via Homebrew: brew install llvm")
+		else:
+			warn(" - Ensure read and execute permissions (+x) are granted for binaries in NDK directory.")
+			warn(" - sudo apt-get install clang (or install LLVM package via your package manager)")
+		warn(f"Expected toolchain location: {os.path.join(prebuilt_dir, '<host>', 'bin')}")
+
+def require_compiler_executable(abi: str, install_if_required: bool = False) -> Optional[str]:
 	from .output_directory import get_config_directory
-	ndk_directory = join(get_config_directory(), "ndk", arch)
-	file = search_for_gcc_executable(ndk_directory)
-	if install_if_required:
-		install_gcc(arches=arch, reinstall=False)
-		file = search_for_gcc_executable(ndk_directory)
+	ndk_directory = join(get_config_directory(), "ndk", abi)
+	file = search_for_clang_executable(ndk_directory)
+
+	if not file or not isfile(file):
+		ndk_version = get_ndk_version_for_abi(abi)
+		ndk_path = get_ndk_path(ndk_version=ndk_version)
+		if ndk_path:
+			file = search_for_clang_executable(ndk_path, verbose=True)
+
+	if install_if_required and (not file or not isfile(file)):
+		attention(f"Executable of GCC ({abi}) is not found, trying to reinstall it.")
+		if install_ndk(abis=abi, reinstall=True) != 0:
+			return
+		file = search_for_clang_executable(ndk_directory)
 		if not file or not isfile(file):
-			attention(f"Executable of GCC (abi: {arch}) is not found, trying to reinstall it.")
-			if install_gcc(arches=arch, reinstall=True) != 0:
-				return None
-			file = search_for_gcc_executable(ndk_directory)
-			if not file or not isfile(file):
-				failure("Critical exception occured, installation is not supported anymore!")
-				return None
+			return
+
 	return file
 
 def prepare_compiler_executable(abi: str) -> str:
-	arch = abi_to_arch(abi)
-	if arch in GCC_EXECUTABLES:
-		return GCC_EXECUTABLES[arch]
-	executable = require_compiler_executable(arch, install_if_required=True)
+	if abi in GCC_EXECUTABLES:
+		return GCC_EXECUTABLES[abi]
+	executable = require_compiler_executable(abi, install_if_required=True)
 	if not executable:
 		from .native_build import CODE_FAILED_NO_GCC
 		raise RuntimeCodeError(CODE_FAILED_NO_GCC, f"Failed to acquire compiler executable from NDK for ABI {abi!r}!")
-	GCC_EXECUTABLES[arch] = executable
+	GCC_EXECUTABLES[abi] = executable
 	return executable
 
-def check_installation(arches: Union[str, List[str]]) -> bool:
-	if not isinstance(arches, list):
-		arches = [arches]
-	from .output_directory import get_config_directory
-	return len(list(filter(
-		lambda arch: not isfile(join(get_config_directory(), "ndk", f".installed-{arch}")),
-		arches
-	))) == 0
+def check_installation(abis: Union[str, List[str]]) -> bool:
+	if not isinstance(abis, list):
+		abis = [abis]
+	for abi in abis:
+		if not require_compiler_executable(abi, install_if_required=False):
+			return False
+	return True
 
 def get_download_ndk_url(revision: str) -> str:
 	overriden_url = GLOBALS.TOOLCHAIN_CONFIG.get_value("native.ndkUrl", GLOBALS.TOOLCHAIN_CONFIG.get_value("ndkUrl"))
@@ -183,9 +249,9 @@ def get_download_ndk_url(revision: str) -> str:
 		return overriden_url
 	pattern_version = re.search(r"\d+", revision)
 	requires_architecture = pattern_version and int(pattern_version[0]) >= 11 and int(pattern_version[0]) <= 22
-	is_32bit = struct.calcsize("P") == 4
-	if is_32bit and (not pattern_version or requires_architecture or int(pattern_version[0]) >= 21):
-		raise RuntimeCodeError(255, "Your platform is not supported anymore, you should upgrade to 64 bit for using Android NDK r21e and newer.")
+	is_32bit = get_os_bitness() == 32
+	if is_32bit and (not pattern_version or requires_architecture or int(pattern_version[0]) >= 18):
+		raise RuntimeCodeError(255, "Your platform is not supported anymore, you should upgrade to 64 bit for using Android NDK r18 and newer.")
 	package_suffix = platform.system()
 	if package_suffix == "Windows":
 		if is_32bit or requires_architecture:
@@ -202,8 +268,8 @@ def get_download_ndk_url(revision: str) -> str:
 		package_suffix = "linux-x86_64" if requires_architecture else "linux"
 	return f"https://dl.google.com/android/repository/android-ndk-{revision}-{package_suffix}.zip"
 
-def download_gcc(ndk_version: Optional[str] = None) -> Optional[str]:
-	revision = ndk_version_to_revision(ndk_version) if ndk_version else "r16b"
+def download_ndk(ndk_version: Optional[str] = None) -> Optional[str]:
+	revision = ndk_version_to_revision(ndk_version) if ndk_version else "r21e"
 
 	archive_path = queue_download_request(get_download_ndk_url(revision))
 	if archive_path is None:
@@ -234,39 +300,14 @@ def download_gcc(ndk_version: Optional[str] = None) -> Optional[str]:
 		except zipfile.BadZipFile as exc:
 			try:
 				remove_tree(extract_path)
-				return download_gcc(revision)
+				return download_ndk(revision)
 			except OSError as exc:
 				failure(f"#{exc.errno}: {basename(exc.filename)} (security fail)")
 
 	return search_ndk_path(extract_path, contains_ndk=True, ndk_version=ndk_version)
 
-def install_distutils_optionally() -> bool:
-	try:
-		try:
-			from distutils.core import setup  # type: ignore
-			return True
-		except ImportError:
-			pass
-		pip_output = subprocess.run([
-			"pip3" if platform.system() != "Windows" else "pip",
-			"install", "setuptools"
-		], capture_output=True, text=True)
-		setuptools_installed = pip_output.returncode == 0
-		if setuptools_installed:
-			success("Dependency distutils for Android NDK successfully installed!")
-		else:
-			warn("Android NDK requires distutils dependency in order to work, but installation went wrong:")
-			warn(pip_output.stderr.strip())
-		return setuptools_installed
-	except OSError:
-		pass
-	return False
-
-def download_and_make_standalone_toolchain(arch: str, reinstall: bool = False) -> int:
-	abi = arch_to_abi(arch)
-	ndk_version = GLOBALS.PREFERRED_CONFIG.get_value("native.ndkVersions." + abi)
-	if not ndk_version and abi in FALLBACK_NDK_VERSIONS:
-		ndk_version = FALLBACK_NDK_VERSIONS[abi]
+def install_ndk_for_architecture(abi: str, reinstall: bool = False) -> int:
+	ndk_version = get_ndk_version_for_abi(abi)
 	ndk_path = get_ndk_path(ndk_version=ndk_version)
 
 	if not ndk_path:
@@ -276,44 +317,21 @@ def download_and_make_standalone_toolchain(arch: str, reinstall: bool = False) -
 		if ndk_version:
 			question = f"Install NDK {ndk_version} from Android Repository?"
 		if reinstall or confirm_prompt(question, True):
-			ndk_path = download_gcc(ndk_version=ndk_version)
+			ndk_path = download_ndk(ndk_version=ndk_version)
 		else:
 			abort()
 
 	if not ndk_path:
 		failure("Installation interrupted by raised cause above, you are must extract 'temp/ndk-r**.zip' manually into temp and retry task.")
 		return 1
+	return 0
 
-	with InteractiveSession(progress=Progress(f"Making standalone toolchain of {abi}...", percentage=0.5)) as session:
-		from .output_directory import get_config_directory
-		output = subprocess.run([
-			"python3" if platform.system() != "Windows" else "python",
-			join(ndk_path, "build", "tools", "make_standalone_toolchain.py"),
-			"--arch", arch,
-			"--api", "21" if "64" in arch else "19",
-			"--install-dir", join(get_config_directory(), "ndk", arch),
-			"--force"
-		], capture_output=True, text=True)
-		if output.returncode != 0:
-			error(output.stderr.strip())
-			failure(f"Failed to make a standalone toolchain for {abi} architecture with code {output.returncode}!")
-			return output.returncode
-		else:
-			ensure_file(join(get_config_directory(), "ndk", f".installed-{arch}"))
-			success(f"Now native builds are available for {arch} architecture.")
-	return output.returncode
-
-def install_gcc(arches: Union[str, List[str]] = "arm", reinstall: bool = False) -> int:
-	if not reinstall and check_installation(arches):
-		return 0
-
-	setuptools_troubleshoot = install_distutils_optionally()
-	if not isinstance(arches, list):
-		arches = [arches]
-
+def install_ndk(abis: Union[str, List[str]] = "arm", reinstall: bool = False) -> int:
 	result = 0
-	for arch in arches:
-		result = download_and_make_standalone_toolchain(arch, reinstall=reinstall)
+	if not isinstance(abis, list):
+		abis = [abis]
+	for abi in abis:
+		result = install_ndk_for_architecture(abi, reinstall=reinstall)
 		if result != 0:
 			break
 
@@ -325,21 +343,5 @@ def install_gcc(arches: Union[str, List[str]] = "arm", reinstall: bool = False) 
 		pass
 
 	if result != 0:
-		if setuptools_troubleshoot:
-			if sys.version_info > (3, 11):
-				troubleshoot = "To use Android NDK starting with Python 3.12 requires installation of distutils dependency."
-			else:
-				troubleshoot = "Your Python installation does not contain distutils dependency needed to run Android NDK."
-			attention(troubleshoot, "We were unable to do this automatically, so you can try following options to solve problem:")
-			if platform.system() == 'Windows':
-				warn(" - pip install setuptools")
-				warn(" - python -m pip install setuptools")
-			else:
-				warn(" - apt-get install python-setuputils")
-				warn(" - pacman -S python-setuputils")
-				warn(" - pip3 install setuptools")
-				warn(" - python3 -m pip install setuptools")
-			warn(f"Visit https://docs.python.org/3/library/distutils.html for details.")
-		else:
-			warn("Please use a different version of Android NDK or report this issue to developer.")
+		warn("Please use a different version of Android NDK or report this issue to developer.")
 	return result
