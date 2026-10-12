@@ -16,6 +16,16 @@ class ConfigSupportsKeysAndGetItem(Protocol):
 ConfigResultType = TypeVar("ConfigResultType")
 
 class Config(Dict[str, Any]):
+	@property
+	def defaults(self) -> Optional['Config']:
+		return self._defaults
+
+	@defaults.setter
+	def defaults(self, value: Optional['Config']) -> None:
+		if value is self:
+			raise ValueError("Config defaults cannot point to config itself!")
+		self._defaults = value
+
 	def __init__(self, map: Optional[ConfigSupportsKeysAndGetItem] = None, defaults: Optional['Config'] = None):
 		super().__init__()
 		self.defaults = defaults
@@ -86,18 +96,18 @@ class Config(Dict[str, Any]):
 		return value
 
 	def obtain_config(self, key: str, *, implace_fallback: bool = False, allow_prototype: bool = True) -> 'Config':
-		config = self.obtain(key, Config, implace_fallback=implace_fallback, allow_prototype=allow_prototype)
+		config = self.obtain(key, Config, implace_fallback=implace_fallback, allow_prototype=False)
 		if allow_prototype and self.defaults is not None:
 			# Ensure that fallbacks/merge strategies are passed to subconfigs.
-			prototype_config = self.defaults.obtain(key, Config, implace_fallback=False)
-			if prototype_config is not None and prototype_config != config.defaults:
+			prototype_config = self.defaults.obtain(key, Config, implace_fallback=False, fallback=lambda: None)
+			if prototype_config and prototype_config != config.defaults:
 				if config.defaults is not None:
 					prototype_config.defaults = config.defaults
 				config.defaults = prototype_config
 		return config
 
 	def obtain_list(self, key: str, *, implace_fallback: bool = False, allow_prototype: bool = True) -> List:
-		sequence = self.obtain(key, list, fallback=lambda: list(), implace_fallback=implace_fallback, allow_prototype=allow_prototype)
+		sequence = self.obtain(key, list, fallback=lambda: list(), implace_fallback=implace_fallback, allow_prototype=False)
 		if allow_prototype and self.defaults is not None:
 			# Merging lists, maybe creating a new one is sometimes not convenient, then you should use allow_prototype=False.
 			prototype_sequence = self.defaults.obtain_list(key, implace_fallback=False)
@@ -185,7 +195,8 @@ class Config(Dict[str, Any]):
 			self.set_dict_value(key, self.replace_value(value, fallback, strip_none_from_lists=strip_none_from_lists))
 
 	def delete_dict_value(self, key: str) -> None:
-		super().__delitem__(key)
+		if key in self:
+			super().__delitem__(key)
 
 	def delete_value(self, key: str, *, remove_when_empty: bool = True) -> None:
 		self.delete_value_unsafe(key, remove_mismatched_types=True, remove_when_empty=remove_when_empty)

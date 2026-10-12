@@ -85,13 +85,13 @@ class MakeModData(FlushableMakeProjectData):
 	def flush_to_output(self, directory: str) -> int:
 		info_file = join(directory, "mod.info")
 		info = FileConfig(info_file, do_not_read=True)
-		if not ensure_not_whitespace(self.name):
+		if ensure_not_whitespace(self.name):
 			info.set_value("name", self.name)
-		if not ensure_not_whitespace(self.author):
+		if ensure_not_whitespace(self.author):
 			info.set_value("author", self.author)
-		if not ensure_not_whitespace(self.version):
+		if ensure_not_whitespace(self.version):
 			info.set_value("version", self.version)
-		if not ensure_not_whitespace(self.description):
+		if ensure_not_whitespace(self.description):
 			info.set_value("description", self.description)
 		if self.client_only:
 			info.set_value("clientOnly", True)
@@ -120,7 +120,7 @@ class MakeModpackData(FlushableMakeProjectData):
 	def flush_to_output(self, directory: str) -> int:
 		manifest_file = join(directory, "modpack.json")
 		manifest = FileConfig(manifest_file, do_not_read=False)
-		if not ensure_not_whitespace(self.name):
+		if ensure_not_whitespace(self.name):
 			manifest.set_value("packName", self.name)
 		if isinstance(self.displayed_name, MutableMapping) or ensure_not_whitespace(self.displayed_name):
 			manifest.set_value("displayedName", self.displayed_name)

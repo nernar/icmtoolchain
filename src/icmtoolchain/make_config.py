@@ -279,13 +279,19 @@ class MakeConfig(MakeDataConfig):
 
 	def iterate_assets(self) -> Iterable[MakeAssetData]:
 		for source in self.obtain_list("additional"):
+			if isinstance(source, str):
+				yield MakeAssetData(
+					relative_path=source,
+					output_path="."
+				)
+				continue
 			if not isinstance(source, Config):
 				continue
 			yield self.obtain_asset_data(source)
 
 	def obtain_asset_data(self, source: Config) -> MakeAssetData:
-		relative_path = source.get_value_unsafe("path")
-		output_path = source.get_value_unsafe("targetDir")
+		relative_path = source.get_value("source", lambda: source.get_value_unsafe("path"))
+		output_path = source.get_value("targetDir", ".")
 
 		return MakeAssetData(
 			relative_path=relative_path,
