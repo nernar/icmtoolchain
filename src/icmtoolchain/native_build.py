@@ -302,7 +302,7 @@ def build_native_directories(arched_directories: Iterable[Tuple[str, Iterable[Ma
 
 			libraries_count = 0
 			for abi_target in target.abis:
-				source_library = abspath(join(target.output_directory, "so", abi_target.abi, soname))
+				source_library = abspath(join(target.input_directory, "so", abi_target.abi, soname))
 				if isfile(source_library):
 					target_library = abspath(join(target.output_directory, "so", abi_to_runtime_architecture(abi_target.abi), soname))
 					copy_file(source_library, target_library)
