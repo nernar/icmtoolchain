@@ -27,14 +27,15 @@ class BuildTarget:
 		self.entries: List[BuildTargetEntry] = []
 
 	def declare(self, relative_path: str, exclude: bool = False, declare: Optional[Dict] = None, declare_default: Optional[Dict] = None) -> BuildTargetEntry:
-		if "{}" not in relative_path:
-			relative_path += "{}"
+		target_relative_path = join(self.relative_directory, relative_path)
+		if "{}" not in target_relative_path:
+			target_relative_path += "{}"
 
 		existing_names = { entry.name for entry in self.entries }
 		index = 2
-		formatted_name = relative_path.format("")
+		formatted_name = target_relative_path.format("")
 		while formatted_name in existing_names:
-			formatted_name = relative_path.format(index)
+			formatted_name = target_relative_path.format(index)
 			index += 1
 
 		entry = BuildTargetEntry(
