@@ -141,7 +141,7 @@ def device_list() -> Optional[List[Dict[str, Any]]]:
 		return None
 	data = pipe.stdout.rstrip().splitlines()
 	data.pop(0)
-	devices = list()
+	devices = []
 	for device in data:
 		parts = re.split(r"\s+", device)
 		devices.append({
@@ -197,7 +197,7 @@ def ensure_device_ready(timeout: float = 15.0) -> bool:
 
 def get_adb_command_by_serial(serial: str) -> List[str]:
 	ensure_server_running()
-	devices = GLOBALS.TOOLCHAIN_CONFIG.get_value("devices", list())
+	devices = GLOBALS.TOOLCHAIN_CONFIG.obtain_list("devices")
 	if not serial in devices:
 		try:
 			from ipaddress import ip_address
@@ -221,7 +221,7 @@ def get_adb_command_by_tcp(ip: str, port: Optional[int] = None, skip_error: bool
 	}
 	if port:
 		device["port"] = port
-	devices = GLOBALS.TOOLCHAIN_CONFIG.get_value("devices", list())
+	devices = GLOBALS.TOOLCHAIN_CONFIG.obtain_list("devices")
 	if not device in devices:
 		devices.append(device)
 		GLOBALS.TOOLCHAIN_CONFIG.set_value("devices", devices)
@@ -286,9 +286,10 @@ def launch_package_via_monkey(package: str) -> bool:
 		return False
 
 def test_directory_exist(path: str, *args: str) -> bool:
+	escaped_path = "'" + path.replace("'", "'\\''") + "'"
 	try:
 		subprocess.run(GLOBALS.ADB_COMMAND + [
-			"shell", "test", "-d", path
+			"shell", "test", "-d", escaped_path
 		] + list(args), check=True)
 	except subprocess.CalledProcessError as err:
 		if err.returncode != 1:
@@ -296,20 +297,40 @@ def test_directory_exist(path: str, *args: str) -> bool:
 		return False
 	return True
 
-def ls(path: str, *args: str) -> Tuple[List[str], List[str]]:
+def ls(path: str, show_hidden: bool = True) -> Tuple[List[str], List[str]]:
+	escaped_path = "'" + path.replace("'", "'\\''") + "'"
+	glob_pattern = ".* *" if show_hidden else "*"
+
+	list_exec = (
+		f"cd {escaped_path} >/dev/null 2>&1 || exit 1\n"
+		f"for f in {glob_pattern}; do\n"
+		f"[ \"$f\" = \".\" ] || [ \"$f\" = \"..\" ] && continue\n"
+		f"[ -e \"./$f\" ] || [ -L \"./$f\" ] || continue\n"
+		f"if [ -d \"./$f\" ]; then echo \"$f/\"; else echo \"$f\"; fi\n"
+		f"done\n"
+		f"exit 0\n"
+	)
+
 	try:
-		pipe = subprocess.run(GLOBALS.ADB_COMMAND + [
-			"shell", "ls", "-F", path
-		] + list(args), text=True, check=True, capture_output=True)
+		pipe = subprocess.run(
+			GLOBALS.ADB_COMMAND + ["shell"],
+			input=list_exec, text=True, encoding="utf-8", errors="replace", check=True, capture_output=True
+		)
 	except subprocess.CalledProcessError as err:
 		if err.returncode != 1:
 			failure("adb shell ls failed with code", err.returncode)
-		return (list(), list())
+		return [], []
 	except KeyboardInterrupt:
-		return (list(), list())
-	files, directories = list(), list()
-	for partition in (entry.partition(" ") for entry in pipe.stdout.rstrip().splitlines()):
-		is_directory = (len(partition[2]) != 0 and partition[0] == "d") or partition[0][-1] == "/"
-		filename = partition[2] if len(partition[2]) > 0 else partition[0][:-1] if partition[0][-1] == "/" else partition[0]
-		(directories if is_directory else files).append(filename)
+		return [], []
+
+	files, directories = [], []
+	
+	for line in pipe.stdout.splitlines():
+		if not line:
+			continue
+		if line.endswith("/"):
+			directories.append(line[:-1])
+		else:
+			files.append(line)
+
 	return directories, files
