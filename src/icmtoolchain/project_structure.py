@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 from .config import FileConfig
 from .hglob import glob
 from .language import MakeDataConfig
-from .utils import ensure_directory, remove_tree
+from .utils import ensure_directory, is_empty_directory, remove_tree
 
 
 @dataclass
@@ -50,6 +50,10 @@ class BuildTarget:
 
 	def cleanup(self, clear_output: bool = True) -> None:
 		ensure_directory(self.output_directory)
+
+	def cleanup_after_export(self) -> None:
+		if is_empty_directory(self.output_directory, non_existing_as_empty=False):
+			remove_tree(self.output_directory)
 
 	def export_entry(self, entry: BuildTargetEntry) -> Optional[Dict]:
 		return {
@@ -172,6 +176,10 @@ class ProjectStructure(ABC):
 		for target in self.targets.values():
 			target.cleanup(clear_output)
 
+	def cleanup_after_export(self) -> None:
+		for target in self.targets.values():
+			target.cleanup_after_export()
+
 class BuildConfigStructure(ProjectStructure, ABC):
 	def __init__(self, output_directory: str, make_config: MakeDataConfig):
 		self.make_config = make_config
@@ -227,6 +235,7 @@ class BuildConfigStructure(ProjectStructure, ABC):
 		self.merge_target_group(config, "nativeDirs", self.export_targets("nativeDirs"))
 
 		config.save_as_file(indent=" " * 2)
+		self.cleanup_after_export()
 
 class IsolatedBuildConfigStructure(BuildConfigStructure):
 	def setup_targets(self) -> None:

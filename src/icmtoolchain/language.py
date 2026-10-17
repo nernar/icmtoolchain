@@ -97,7 +97,7 @@ class MakeModData(FlushableMakeProjectData):
 			info.set_value("clientOnly", True)
 		elif self.server_only:
 			info.set_value("serverOnly", True)
-		info.save_as_file()
+		info.save_as_file(indent="\t")
 
 		icon_path = GLOBALS.MAKE_CONFIG.get_path(self.icon or "mod_icon.png")
 		output_info_path = join(directory, "mod_icon.png")

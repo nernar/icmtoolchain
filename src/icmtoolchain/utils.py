@@ -204,6 +204,14 @@ def iterate_subdirectories(path: str, max_depth: int = 5, /, skip_yielding: bool
 			if entry.is_dir():
 				yield from iterate_subdirectories(entry.path, max_depth - 1 if max_depth > 0 else -1, skip_yielding=True)
 
+def is_empty_directory(directory: str, non_existing_as_empty: bool = True) -> bool:
+	if not isdir(directory):
+		return non_existing_as_empty
+	with os.scandir(directory) as entries:
+		for _ in entries:
+			return False
+	return True
+
 @overload
 def ensure_not_whitespace(what: Optional[str], fallback: None = None) -> Optional[str]: ...
 @overload
@@ -357,7 +365,7 @@ class AttributeZipFile(ZipFile):
 			os.chmod(abspath(targetpath), attr)
 		return targetpath
 
-def get_os_bitness():
+def get_os_bitness() -> int:
 	if platform.system() == "Windows":
 		if "PROCESSOR_ARCHITEW6432" in os.environ:
 			return 64
