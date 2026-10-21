@@ -37,9 +37,10 @@ class BuildTarget:
 			formatted_name = relative_path.format(index)
 			index += 1
 
+		relative_formatted_path = join(self.relative_directory, formatted_name)
 		entry = BuildTargetEntry(
 			name=formatted_name,
-			relative_path=formatted_name.replace("\\", "/"),
+			relative_path=relative_formatted_path.replace("\\", "/"),
 			absolute_path=join(self.output_directory, formatted_name),
 			exclude=exclude,
 			declare=declare or {},
@@ -244,7 +245,7 @@ class IsolatedBuildConfigStructure(BuildConfigStructure):
 		gui_path = self.make_config.get_value("target.gui", "gui")
 		self.append("gui", ResourceIsolatedTarget(gui_path, join(self.directory, gui_path), resource_type="gui", export_group="resources"))
 
-		script_path = self.make_config.get_value("target.source", "source")
+		script_path = self.make_config.get_value("target.source", "script")
 		self.append("scripts", IsolatedTarget(script_path, join(self.directory, script_path), export_group="compile"))
 		library_path = self.make_config.get_value("target.library", "library")
 		self.append("libraries", IsolatedTarget(library_path, join(self.directory, library_path), export_group="compile"))
@@ -268,7 +269,7 @@ class InplaceBuildConfigStructure(BuildConfigStructure):
 		gui_path = self.make_config.get_value("target.gui", "gui")
 		self.append("gui", ResourceInplaceTarget(gui_path, join(self.directory, gui_path), resource_type="gui", export_group="resources"))
 
-		script_path = self.make_config.get_value("target.source", "source")
+		script_path = self.make_config.get_value("target.source", "script")
 		self.append("scripts", InplaceTarget(script_path, join(self.directory, script_path), export_group="compile"))
 		library_path = self.make_config.get_value("target.library", "library")
 		self.append("libraries", InplaceTarget(library_path, join(self.directory, library_path), export_group="compile"))
