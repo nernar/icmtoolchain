@@ -1,41 +1,29 @@
-from dataclasses import dataclass
-from itertools import chain
-from os.path import basename, exists, isdir, isfile, join, relpath, splitext
+from os.path import basename, exists, isdir, isfile, join, splitext
 from time import time
-from typing import Any, List, MutableMapping, Optional, Tuple
+from typing import TYPE_CHECKING, Any, MutableMapping, Optional
 
 from .context import GLOBALS, PROPERTIES
-from .includes import Includes
 from .language import MakeScriptData
-from .logger import attention, debug, failure, frozen, print, success
+from .logger import attention, debug, failure, frozen, success
 from .output_directory import expand_paths
-from .script_setup import request_typescript
-from .utils import (RuntimeCodeError, copy_file, ensure_not_whitespace,
-                    walk_all_files)
+from .utils import RuntimeCodeError, ensure_not_whitespace, walk_all_files
 
+if TYPE_CHECKING:
+	from .script_transpiler import ScriptRepository
 
-@dataclass
-class DirectorySource:
-	includes: Includes
-	destination_path: str
-	language: str
-
-@dataclass
-class FileSource:
-	source_path: str
-	destination_path: str
-	language: str
 
 def build_all_scripts() -> int:
 	GLOBALS.PROJECT_STRUCTURE.cleanup_target("scripts")
 	GLOBALS.PROJECT_STRUCTURE.cleanup_target("libraries")
 
-	if request_typescript(only_check=True) and not isdir(GLOBALS.TOOLCHAIN_CONFIG.get_relative_path("declarations")):
+	from .script_setup import request_typescript
+	tsc_available = request_typescript(only_check=True) is not None
+	if tsc_available and not isdir(GLOBALS.TOOLCHAIN_CONFIG.get_relative_path("declarations")):
 		from .output_directory import get_config_directory
 		if not isdir(join(get_config_directory(), "declarations")):
 			attention("Not found 'declarations', in most cases build will be failed, please install it via tasks.")
 
-	return build_composite_project()
+	return transpile_project(tsc_available=tsc_available)
 
 def declare_build_target(source: MakeScriptData, target_path: str) -> str:
 	declare: MutableMapping[str, Any] = {
@@ -82,11 +70,33 @@ def detect_source_language(source_path: str) -> Optional[str]:
 		return None
 	return "typescript" if detected_typescript else "javascript"
 
-def compute_and_capture_changed_scripts() -> Tuple[List[FileSource], List[FileSource], List[DirectorySource], List[DirectorySource]]:
-	changed_files = []
-	files = []
-	changed_directories = []
-	directories = []
+def request_type_check() -> int:
+	type_check_mode = GLOBALS.PREFERRED_CONFIG.get_value("typeChecking", "always")
+	should_type_check = (
+		type_check_mode == "always"
+		or (type_check_mode == "on-release" and PROPERTIES.get_value("release"))
+	)
+
+	if should_type_check:
+		debug("Running type-check via tsc --noEmit")
+		startup_millis = time()
+		overall_result = GLOBALS.TSC_COMPOSITE.type_check(*(
+			["--force"] if PROPERTIES.get_value("release") else []
+		))
+		startup_millis = time() - startup_millis
+
+		if overall_result != 0:
+			failure(f"Type-check failed in {startup_millis:.2f}s with result {overall_result}.")
+			return overall_result
+		success(f"Type-check completed in {startup_millis:.2f}s.")
+	return 0
+
+def collect_script_repository() -> 'ScriptRepository':
+	from .script_transpiler import ScriptRepository
+	repository = ScriptRepository()
+	from .script_setup import request_typescript, should_use_babel
+	use_babel = should_use_babel()
+	from .includes import Includes
 
 	for source in GLOBALS.MAKE_CONFIG.iterate_scripts():
 		includes_path = ensure_not_whitespace(source.includes_path, ".includes")
@@ -127,162 +137,52 @@ def compute_and_capture_changed_scripts() -> Tuple[List[FileSource], List[FileSo
 				prefixed_path += "{}"
 
 			destination_path = declare_build_target(source, prefixed_path)
+			transpiler = "concat" if language == "javascript" else "babel" if use_babel else "tsc"
 
 			if isdir(source_path):
 				includes = Includes.invalidate(source_path, includes_path)
-				if includes.compute(destination_path, language):
-					changed_directories.append(DirectorySource(includes, destination_path, language))
-				directories.append(DirectorySource(includes, destination_path, language))
-
+				repository.include_directory(includes, destination_path, transpiler)
 			elif isfile(source_path):
-				if GLOBALS.BUILD_STORAGE.is_path_changed(source_path) or (language == "typescript" and not isfile(
-					join(GLOBALS.MAKE_CONFIG.get_build_path("sources"), relpath(source_path, GLOBALS.MAKE_CONFIG.directory))
-				)):
-					changed_files.append(FileSource(source_path, destination_path, language))
-				files.append(FileSource(source_path, destination_path, language))
+				repository.include_file(source_path, destination_path, transpiler)
 
 	if PROPERTIES.get_value("debug"):
-		debug(f"Files ({len(files)}): {', '.join([str(file) for file in files])}")
-		debug(f"Changed Files ({len(changed_files)}): {', '.join([str(file) for file in changed_files])}")
-		debug(f"Directories ({len(directories)}): {', '.join([str(directory) for directory in directories])}")
-		debug(f"Changed Directories ({len(changed_directories)}): {', '.join([str(directory) for directory in changed_directories])}")
+		debug(f"Files ({len(repository.files)}): {', '.join([str(file) for file in repository.files])}")
+		debug(f"Directories ({len(repository.directories)}): {', '.join([str(directory) for directory in repository.directories])}")
 
-	return changed_files, files, changed_directories, directories
+	return repository
 
-def copy_build_targets(files: List[FileSource], directories: List[DirectorySource]) -> None:
-	temporary_directory = GLOBALS.MAKE_CONFIG.get_build_path("sources")
-
-	for source in directories:
-		temporary_script = join(temporary_directory, basename(source.destination_path))
-
-		if not isfile(temporary_script) or GLOBALS.BUILD_STORAGE.is_path_changed(temporary_script) or not isfile(source.destination_path):
-			if isfile(temporary_script):
-				copy_file(temporary_script, source.destination_path)
-			else:
-				attention(f"Not found build target {basename(temporary_script)!r}, maybe it building emitted error or corresponding source is empty.")
-				continue
-
-		if not GLOBALS.BUILD_STORAGE.is_path_changed(temporary_script):
-			frozen(f"Build target {basename(temporary_script)!r} is not changed.")
-
-	for source in files:
-		# Single JavaScript sources when TypeScript is not forced just copies to output without
-		# temporary caching; might be breaking change in future.
-		if GLOBALS.TSC_COMPOSITE.requires_composite() and source.language != "javascript":
-			temporary_script = join(temporary_directory, relpath(source.source_path, GLOBALS.MAKE_CONFIG.directory))
-		else:
-			temporary_script = source.source_path
-
-		if temporary_script == source.source_path and isfile(temporary_script) and GLOBALS.BUILD_STORAGE.is_path_changed(temporary_script):
-			print(f"Flushing {basename(source.destination_path)!r} from {basename(source.source_path)!r}")
-
-		if not isfile(temporary_script) or GLOBALS.BUILD_STORAGE.is_path_changed(temporary_script) or not isfile(source.destination_path):
-			if isfile(temporary_script):
-				copy_file(temporary_script, source.destination_path)
-			else:
-				attention(f"Not found build target {basename(temporary_script)!r}, but it directly included!")
-				continue
-
-		if not GLOBALS.BUILD_STORAGE.is_path_changed(temporary_script):
-			frozen(f"Build target {basename(temporary_script)!r} is not changed.")
-
-	GLOBALS.BUILD_STORAGE.save()
-
-def request_type_check() -> int:
-	type_check_mode = GLOBALS.PREFERRED_CONFIG.get_value("typeChecking", "always")
-	should_type_check = (
-		type_check_mode == "always"
-		or (type_check_mode == "on-release" and PROPERTIES.get_value("release"))
-	)
-
-	if should_type_check:
-		debug("Running type-check via tsc --noEmit")
-		startup_millis = time()
-		overall_result = GLOBALS.TSC_COMPOSITE.type_check(*(
-			["--force"] if PROPERTIES.get_value("release") else []
-		))
-		startup_millis = time() - startup_millis
-
-		if overall_result != 0:
-			failure(f"Type-check failed in {startup_millis:.2f}s with result {overall_result}.")
-			return overall_result
-		success(f"Type-check completed in {startup_millis:.2f}s.")
-	return 0
-
-def build_composite_project() -> int:
-	changed_files, files, changed_directories, directories = compute_and_capture_changed_scripts()
-
-	from .script_setup import should_use_babel
-	use_babel = should_use_babel()
-	tsc_available = request_typescript(only_check=True)
+def transpile_project(tsc_available: bool = False) -> int:
+	from .script_transpiler import iterate_transpilers
+	repository = collect_script_repository()
 
 	overall_result = 0
 	if tsc_available:
-		for source in files:
-			if source.language == "typescript":
-				GLOBALS.TSC_COMPOSITE.coerce(source.source_path)
-		for source in directories:
-			if source.language == "typescript":
-				GLOBALS.TSC_COMPOSITE.reference(source.includes.directory)
+		for source in repository.files:
+			GLOBALS.TSC_COMPOSITE.coerce(source.source_path)
+		for source in repository.directories:
+			GLOBALS.TSC_COMPOSITE.reference(source.includes.directory)
 		GLOBALS.TSC_COMPOSITE.flush()
 
+		from .script_setup import should_use_babel
+		use_babel = should_use_babel()
 		if use_babel:
 			overall_result += request_type_check()
 			if overall_result != 0:
 				return overall_result
 
-	for source in changed_directories:
-		if source.language == "javascript":
-			overall_result += source.includes.build(source.destination_path, source.language)
+	for transpiler in iterate_transpilers():
+		overall_result += transpiler.transpile(repository)
 	if overall_result != 0:
 		return overall_result
 
-	if tsc_available and GLOBALS.TSC_COMPOSITE.has_sources():
-		detected_changes = list(filter(lambda source: source.language == "typescript", chain(changed_files, changed_directories)))
+	for source in repository.iterate():
+		if not isfile(source.destination_path):
+			failure(f"No suitable transpiler {source.transpiler!r} could be found for {GLOBALS.MAKE_CONFIG.get_path_to_config(source.source_path)!r}!")
+			overall_result += 1
+		elif not GLOBALS.BUILD_STORAGE.is_path_changed(source.destination_path):
+			frozen(f"Build target {GLOBALS.MAKE_CONFIG.get_path_to_config(source.source_path)!r} is not changed.")
+	if overall_result != 0:
+		return overall_result
 
-		# Recomputed changes doesn't really matter for tsc, since we'll just want to realize
-		# which files changed with hashing algorithm and composite building may rebuild everything
-		# when tsconfig changes or something unexpected happened, like removing temporary declarations
-		if len(detected_changes) > 0:
-			debug("Rebuilding composite", ", ".join([
-				basename(source.destination_path) for source in detected_changes
-			]))
-
-			from time import time
-			startup_millis = time()
-
-			if use_babel:
-				from .babel_build import transpile_with_babel
-				from .babel_setup import generate_toolchain_babel_config
-				for source in detected_changes:
-					babel_config_path = join(
-						GLOBALS.MAKE_CONFIG.get_build_path("sources"),
-						".toolchain.babel.config.json"
-					)
-					generate_toolchain_babel_config(babel_config_path)
-
-					source_path = source.source_path if isinstance(source, FileSource) else source.includes.directory
-					overall_result += transpile_with_babel(
-						ordered_files=[source_path],
-						output_path=source.destination_path,
-						babel_config_path=babel_config_path,
-						source_directory=GLOBALS.MAKE_CONFIG.directory,
-						force=bool(PROPERTIES.get_value("release")),
-					)
-			else:
-				overall_result += GLOBALS.TSC_COMPOSITE.build(*( 
-					["--force"] if PROPERTIES.get_value("release") else []
-				))
-
-			startup_millis = time() - startup_millis
-			if overall_result == 0:
-				success(f"Completed composite script rebuild in {startup_millis:.2f}s!")
-			else:
-				failure(f"Failed composite script rebuild in {startup_millis:.2f}s with result {overall_result}.")
-
-		if overall_result != 0:
-			return overall_result
-
-	copy_build_targets(files, directories)
 	GLOBALS.PROJECT_STRUCTURE.generate_config()
 	return overall_result

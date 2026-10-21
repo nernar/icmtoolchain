@@ -33,6 +33,12 @@ class Includes:
 		self.include = include or []
 		self.exclude = exclude or []
 
+	def get_absolute_include(self) -> List[str]:
+		return [join(self.directory, relative_path) for relative_path in self.include]
+
+	def get_absolute_exclude(self) -> List[str]:
+		return [join(self.directory, relative_path) for relative_path in self.exclude]
+
 	def read(self) -> None:
 		dependents = []
 		with open(self.path, encoding="utf-8") as includes:

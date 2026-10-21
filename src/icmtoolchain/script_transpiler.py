@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Iterable, List, Optional
 
 from .context import GLOBALS, PROPERTIES
 from .hglob import glob
+from .logger import warn
 from .output_directory import unique_folder_name
 from .script_setup import request_typescript_flags
 from .utils import (copy_file, ensure_directory, flush_json_if_changed,
@@ -126,15 +127,16 @@ class ConcatTranspiler(ScriptTranspiler):
 @dataclass
 class TscBuildTarget:
 	source: ScriptSource
-	output_path: str
-	incremental_path: str
-	composite_path: str
+	temporary_path: str
+	destination_path: str
+	incremental_tsconfig: str
+	composite_tsconfig: str
 
 class TscTranspiler(ScriptTranspiler):
 	def __init__(self) -> None:
 		super().__init__()
 		self.tsc_path = GLOBALS.MAKE_CONFIG.get_build_path("script", "tsc")
-		self.composite_path = os.path.join(self.tsc_path, "composite.tsconfig.json")
+		self.composite_tsconfig = os.path.join(self.tsc_path, "composite.tsconfig.json")
 
 	def prepare_build_targets(self, repository: ScriptRepository) -> List[TscBuildTarget]:
 		build_targets: List[TscBuildTarget] = []
@@ -144,14 +146,14 @@ class TscTranspiler(ScriptTranspiler):
 			else:
 				source_path = os.path.dirname(source.source_path)
 			relative_directory = relativize_or_hash_path(source_path, GLOBALS.MAKE_CONFIG.directory)
-			output_directory = os.path.join(self.tsc_path, relative_directory)
+			temporary_directory = os.path.join(self.tsc_path, relative_directory)
 
 			output_filename = unique_folder_name(source.source_path)
-			incremental_tsconfig = os.path.join(output_directory, f"{output_filename}.tsconfig.json")
-			composite_tsconfig = os.path.join(output_directory, f"{output_filename}.composite.tsconfig.json")
-			output_path = os.path.join(output_directory, f"{output_filename}.js")
+			incremental_tsconfig = os.path.join(temporary_directory, f"{output_filename}.tsconfig.json")
+			composite_tsconfig = os.path.join(temporary_directory, f"{output_filename}.composite.tsconfig.json")
+			temporary_path = os.path.join(temporary_directory, f"{output_filename}.js")
 
-			build_targets.append(TscBuildTarget(source, output_path, incremental_tsconfig, composite_tsconfig))
+			build_targets.append(TscBuildTarget(source, temporary_path, source.destination_path, incremental_tsconfig, composite_tsconfig))
 		return build_targets
 
 	def create_tsconfig_contents(self, include: List[str], exclude: Optional[List[str]] = None, **options) -> dict:
@@ -180,24 +182,26 @@ class TscTranspiler(ScriptTranspiler):
 		return template
 
 	def flush_build_target_tsconfig(self, target: TscBuildTarget):
-		output_filename = os.path.basename(target.output_path)
+		temporary_filename = os.path.basename(target.temporary_path)
 		if isinstance(target.source, DirectorySource):
-			include = target.source.includes.include
-			exclude = target.source.includes.exclude
+			include = target.source.includes.get_absolute_include()
+			exclude = target.source.includes.get_absolute_exclude()
+			root_directory = target.source.source_path
 		else:
 			include = [target.source.source_path]
 			exclude = None
+			root_directory = os.path.dirname(target.source.source_path)
 
-		for composite in [True, False]:
-			tsconfig_path = os.path.join(self.tsc_path, target.composite_path if composite else target.incremental_path)
-			tsconfig = self.create_tsconfig_contents(include, exclude, outFile=output_filename, composite=composite)
+		for composite in (True, False):
+			tsconfig_path = os.path.join(self.tsc_path, target.composite_tsconfig if composite else target.incremental_tsconfig)
+			tsconfig = self.create_tsconfig_contents(include, exclude, outFile=temporary_filename, rootDir=root_directory, composite=composite)
 			flush_json_if_changed(tsconfig_path, tsconfig)
 
 	def flush_composite_tsconfig(self, targets: List[TscBuildTarget]):
 		composite_files = []
 		for target in targets:
 			composite_files.append({
-				"path": os.path.relpath(target.composite_path, self.tsc_path)
+				"path": os.path.relpath(target.composite_tsconfig, self.tsc_path)
 			})
 		tsconfig = {
 			"compilerOptions": {
@@ -205,14 +209,14 @@ class TscTranspiler(ScriptTranspiler):
 			},
 			"references": composite_files
 		}
-		flush_json_if_changed(self.composite_path, tsconfig)
+		flush_json_if_changed(self.composite_tsconfig, tsconfig)
 
 	def search_changed_build_targets(self, targets: List[TscBuildTarget]) -> List[TscBuildTarget]:
 		changed_targets = []
 		for target in targets:
 			has_source_changes = GLOBALS.BUILD_STORAGE.is_path_changed(target.source.source_path)
-			has_tsconfig_changes = GLOBALS.BUILD_STORAGE.is_path_changed(target.incremental_path)
-			if has_source_changes or has_tsconfig_changes or not os.path.isfile(target.output_path):
+			has_tsconfig_changes = GLOBALS.BUILD_STORAGE.is_path_changed(target.incremental_tsconfig)
+			if has_source_changes or has_tsconfig_changes or not os.path.isfile(target.temporary_path):
 				changed_targets.append(target)
 		return changed_targets
 
@@ -229,13 +233,16 @@ class TscTranspiler(ScriptTranspiler):
 			# Do NOT check declarations to resolve conflicts and something else due to --noResolve
 			command.append("--skipLibCheck")
 
-		return subprocess.call(command, shell=platform.system() == "Windows")
+		result = subprocess.run(command, shell=platform.system() == "Windows")
+		if result.returncode != 0:
+			warn(f"Something went wrong while trying to transpile {', '.join(args)!r} with tsc!")
+		return result.returncode
 
 	def transpile_incremental(self, target: TscBuildTarget) -> int:
-		return self.transpile_with_tsc("--project", target.incremental_path)
+		return self.transpile_with_tsc("--project", target.incremental_tsconfig)
 
 	def transpile_composite(self) -> int:
-		return self.transpile_with_tsc("--build", self.composite_path)
+		return self.transpile_with_tsc("--build", self.composite_tsconfig)
 
 	def requires_composite_build(self, targets: List[TscBuildTarget], changed_targets: List[TscBuildTarget]) -> bool:
 		composite_enabled = GLOBALS.MAKE_CONFIG.get("project.composite")
@@ -259,6 +266,14 @@ class TscTranspiler(ScriptTranspiler):
 		else:
 			for target in changed_targets:
 				overall_result += self.transpile_incremental(target)
+		if overall_result != 0:
+			return overall_result
+
+		for target in targets:
+			if not os.path.isfile(target.temporary_path):
+				overall_result += 1
+				continue
+			copy_file(target.temporary_path, target.destination_path)
 		return overall_result
 
 class BabelTranspiler(ScriptTranspiler):
@@ -278,3 +293,18 @@ class BabelTranspiler(ScriptTranspiler):
 	def transpile(self, repository: ScriptRepository) -> int:
 		ensure_directory(self.babel_path)
 		return 0
+
+TRANSPILERS: List[ScriptTranspiler] = []
+
+def initialize_transpilers() -> None:
+	global TRANSPILERS
+	TRANSPILERS = [
+		ConcatTranspiler(),
+		TscTranspiler(),
+		BabelTranspiler()
+	]
+
+def iterate_transpilers() -> Iterable[ScriptTranspiler]:
+	if not TRANSPILERS:
+		initialize_transpilers()
+	yield from iter(TRANSPILERS)
