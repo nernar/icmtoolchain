@@ -9,6 +9,8 @@ from typing import (Any, Callable, Dict, Iterable, List, Optional, TextIO,
                     Tuple, Union, overload)
 from zipfile import ZipFile, ZipInfo
 
+from .logger import warn
+
 DEVNULL = open(os.devnull, "w")
 
 
@@ -51,8 +53,12 @@ def ensure_file(path: str) -> None:
 
 def flush_json_if_changed(json_path: str, contents: Any):
 	if os.path.isfile(json_path):
-		with open(json_path, "r", encoding="utf-8"):
-			previous_contents = json.loads(json_path)
+		previous_contents = None
+		with open(json_path, "r", encoding="utf-8") as json_file:
+			try:
+				previous_contents = json.load(json_file)
+			except json.JSONDecodeError as exc:
+				warn(f"Malformed json {json_path!r}: {exc.msg} (#{exc.lineno}:{exc.colno})")
 		if contents == previous_contents:
 			return
 	ensure_file(json_path)
