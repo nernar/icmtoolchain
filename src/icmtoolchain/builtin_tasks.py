@@ -31,9 +31,8 @@ def task_build_scripts() -> int:
 def task_update_includes() -> int:
 	if not GLOBALS.MAKE_CONFIG.supports_scripts:
 		return 0
-	from .script_build import compute_and_capture_changed_scripts
-	compute_and_capture_changed_scripts()
-	GLOBALS.TSC_COMPOSITE.flush()
+	from .script_build import collect_script_repository_and_coerce
+	collect_script_repository_and_coerce()
 	return 0
 
 @task(

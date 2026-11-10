@@ -151,18 +151,23 @@ def collect_script_repository() -> 'ScriptRepository':
 
 	return repository
 
-def transpile_project(tsc_available: bool = False) -> int:
-	from .script_transpiler import iterate_transpilers
+def collect_script_repository_and_coerce() -> 'ScriptRepository':
 	repository = collect_script_repository()
+	for source in repository.files:
+		GLOBALS.TSC_COMPOSITE.coerce(source.source_path)
+	for source in repository.directories:
+		GLOBALS.TSC_COMPOSITE.reference(source.includes.directory)
+	GLOBALS.TSC_COMPOSITE.flush()
+	return repository
+
+def transpile_project(tsc_available: bool = False) -> int:
+	if tsc_available:
+		repository = collect_script_repository_and_coerce()
+	else:
+		repository = collect_script_repository()
 
 	overall_result = 0
 	if tsc_available:
-		for source in repository.files:
-			GLOBALS.TSC_COMPOSITE.coerce(source.source_path)
-		for source in repository.directories:
-			GLOBALS.TSC_COMPOSITE.reference(source.includes.directory)
-		GLOBALS.TSC_COMPOSITE.flush()
-
 		from .script_setup import should_use_babel
 		use_babel = should_use_babel()
 		if use_babel:
@@ -170,6 +175,7 @@ def transpile_project(tsc_available: bool = False) -> int:
 			if overall_result != 0:
 				return overall_result
 
+	from .script_transpiler import iterate_transpilers
 	for transpiler in iterate_transpilers():
 		overall_result += transpiler.transpile(repository)
 	if overall_result != 0:
